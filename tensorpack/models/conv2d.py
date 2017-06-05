@@ -7,7 +7,7 @@ import tensorflow as tf
 from .common import layer_register, VariableHolder
 from ..utils.argtools import shape2d, shape4d
 
-__all__ = ['Conv2D', 'Deconv2D']
+__all__ = ['Conv2D', 'Deconv2D', 'AtrousConv2D']
 
 
 @layer_register()
@@ -169,3 +169,81 @@ def Deconv2D(x, out_shape, kernel_shape,
     if use_bias:
         ret.variables.b = b
     return ret
+
+@layer_register()
+def AtrousConv2D(x, dilation, out_channel, kernel_shape,
+                 padding='SAME',
+                 W_init=None, b_init=None,
+                 nl=tf.identity, use_bias=True,
+                 mannual_atrous=False, height=224, width=224, batch=1):
+    """
+    2D atrous convolution on 4D inputs.
+
+    Args:
+        x (tf.Tensor): a tensor of shape NHWC.
+            Must have known number of channels, but can have other unknown dimensions.
+        dilation (int): dilation of convolution.
+        out_channel (int): number of output channel.
+        kernel_shape: (h, w) tuple or a int.
+        padding (str): 'valid' or 'same'. Case insensitive.
+        W_init: initializer for W. Defaults to `variance_scaling_initializer`.
+        b_init: initializer for b. Defaults to zero.
+        nl: a nonlinearity function.
+        use_bias (bool): whether to use bias.
+
+    Returns:
+        tf.Tensor: a NHWC tensor named ``output``.
+
+    Variable Names:
+
+    * ``W``: weights
+    * ``b``: bias
+    """
+    in_shape = x.get_shape().as_list()
+    in_channel = in_shape[-1]
+    assert in_channel is not None, "[AtrousConv2D] Input cannot have unknown channel!"
+
+    kernel_shape = shape2d(kernel_shape)
+    padding = padding.upper()
+    filter_shape = kernel_shape + [in_channel, out_channel]
+
+    if W_init is None:
+        W_init = tf.contrib.layers.variance_scaling_initializer()
+    if b_init is None:
+        b_init = tf.constant_initializer()
+
+    W = tf.get_variable('W', filter_shape, initializer=W_init)
+    if use_bias:
+        b = tf.get_variable('b', [out_channel], initializer=b_init)
+
+    if (mannual_atrous == True):
+        # use transpose, reshape, and conv2d to implement atrous_conv2d to support mobile deployment
+        ori_shape = tf.shape(x)
+        x = tf.transpose(x, perm=[1, 2, 3, 0])
+        x = tf.reshape(tensor=x,
+                       shape=[height // dilation,
+                              width // dilation,
+                              ori_shape[3],
+                              batch * dilation * dilation])
+        x = tf.transpose(x, perm=[3, 0, 1, 2])
+
+        conv = tf.nn.conv2d(input=x,
+                            filter=W,
+                            strides=[1, 1, 1, 1],
+                            padding='SAME')
+
+        current_shape = tf.shape(conv)
+        conv = tf.transpose(conv, perm=[1, 2, 3, 0])
+        conv = tf.reshape(tensor=conv,
+                          shape=[height,
+                                 width,
+                                 current_shape[3],
+                                 batch])
+        conv = tf.transpose(conv, perm=[3, 0, 1, 2])
+    else:
+        conv = tf.nn.atrous_conv2d(value=x,
+                                   filters=W,
+                                   rate=dilation,
+                                   padding=padding)
+
+    return nl(tf.nn.bias_add(conv, b) if use_bias else conv, name='output')
