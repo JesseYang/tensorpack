@@ -86,3 +86,5 @@ target/
 
 examples/YOLOv2
 examples/CmdtClassify
+examples/BonePoint
+examples/Segmentation
