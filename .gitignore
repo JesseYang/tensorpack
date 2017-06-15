@@ -88,3 +88,5 @@ examples/YOLOv2
 examples/CmdtClassify
 examples/BonePoint
 examples/Segmentation
+examples/LineSegmentation
+examples/SeqRecog
