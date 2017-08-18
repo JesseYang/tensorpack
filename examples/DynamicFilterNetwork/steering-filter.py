@@ -12,8 +12,10 @@ import multiprocessing
 
 from tensorpack import *
 from tensorpack.utils import logger
+from tensorpack.utils.gpu import get_nr_gpu
 from tensorpack.utils.viz import *
 from tensorpack.utils.argtools import shape2d, shape4d
+from tensorpack.dataflow import dataset
 
 BATCH = 32
 SHAPE = 64
@@ -94,7 +96,6 @@ class OnlineTensorboardExport(Callback):
 
 class Model(ModelDesc):
     def _get_inputs(self):
-        # TODO: allow arbitrary batch sizes
         return [InputDesc(tf.float32, (BATCH, ), 'theta'),
                 InputDesc(tf.float32, (BATCH, SHAPE, SHAPE), 'image'),
                 InputDesc(tf.float32, (BATCH, SHAPE, SHAPE), 'gt_image'),
@@ -120,9 +121,9 @@ class Model(ModelDesc):
         logger.info('Parameter net output: {}'.format(pred_filter.get_shape().as_list()))
         return pred_filter
 
-    def _build_graph(self, input_vars):
+    def _build_graph(self, inputs):
         kernel_size = 9
-        theta, image, gt_image, gt_filter = input_vars
+        theta, image, gt_image, gt_filter = inputs
 
         image = image
         gt_image = gt_image

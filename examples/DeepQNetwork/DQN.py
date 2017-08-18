@@ -96,7 +96,6 @@ class Model(DQNModel):
 
 
 def get_config():
-    M = Model()
     expreplay = ExpReplay(
         predictor_io_names=(['state'], ['Qvalue']),
         player=get_player(train=True),
@@ -111,6 +110,7 @@ def get_config():
 
     return TrainConfig(
         dataflow=expreplay,
+        model=Model(),
         callbacks=[
             ModelSaver(),
             PeriodicTrigger(
@@ -128,11 +128,8 @@ def get_config():
                 every_k_epochs=10),
             HumanHyperParamSetter('learning_rate'),
         ],
-        model=M,
         steps_per_epoch=STEPS_PER_EPOCH,
         max_epoch=1000,
-        # run the simulator on a separate GPU if available
-        predict_tower=[1] if get_nr_gpu() > 1 else [0],
     )
 
 
@@ -149,17 +146,14 @@ if __name__ == '__main__':
 
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    if args.task != 'train':
-        assert args.load is not None
     ROM_FILE = args.rom
     METHOD = args.algo
-
     # set num_actions
-    pl = AtariPlayer(ROM_FILE, viz=False)
-    NUM_ACTIONS = pl.get_action_space().num_actions()
-    del pl
+    NUM_ACTIONS = AtariPlayer(ROM_FILE).get_action_space().num_actions()
+    logger.info("ROM: {}, Num Actions: {}".format(ROM_FILE, NUM_ACTIONS))
 
     if args.task != 'train':
+        assert args.load is not None
         cfg = PredictConfig(
             model=Model(),
             session_init=get_model_loader(args.load),
@@ -171,9 +165,9 @@ if __name__ == '__main__':
             eval_model_multithread(cfg, EVAL_EPISODE, get_player)
     else:
         logger.set_logger_dir(
-            'train_log/DQN-{}'.format(
-                os.path.basename(ROM_FILE).split('.')[0]))
+            os.path.join('train_log', 'DQN-{}'.format(
+                os.path.basename(ROM_FILE).split('.')[0])))
         config = get_config()
         if args.load:
-            config.session_init = SaverRestore(args.load)
+            config.session_init = get_model_loader(args.load)
         QueueInputTrainer(config).train()

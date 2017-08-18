@@ -4,28 +4,25 @@
 # Author: Yuxin Wu <ppwwyyxxc@gmail.com>
 
 import tensorflow as tf
-import itertools
 import operator
-import re
 from six.moves import zip, range
 
 from ..utils import logger
 from ..utils.naming import TOWER_FREEZE_KEYS
-from ..utils.concurrency import LoopThread
 from ..tfutils.common import get_tf_version_number
 from ..tfutils.tower import TowerContext
 from ..tfutils.collection import backup_collection, restore_collection
-from ..tfutils.gradproc import FilterNoneGrad, ScaleGradient
+from ..tfutils.gradproc import ScaleGradient
 from ..callbacks.graph import RunOp
 
+from ..graph_builder.input_source import QueueInput, StagingInputWrapper, DummyConstantInput
 from .base import Trainer
-from .feedfree import SingleCostFeedfreeTrainer
-from .input_source import QueueInput, StagingInputWrapper
 
-__all__ = ['MultiGPUTrainerBase', 'SyncMultiGPUTrainer',
-           'AsyncMultiGPUTrainer', 'LeastLoadedDeviceSetter',
+__all__ = ['MultiGPUTrainerBase', 'LeastLoadedDeviceSetter',
            'SyncMultiGPUTrainerReplicated',
-           'SyncMultiGPUTrainerParameterServer']
+           'SyncMultiGPUTrainerParameterServer',
+           'AsyncMultiGPUTrainer',
+           'SyncMultiGPUTrainer']
 
 
 def _check_tf_version():
@@ -33,15 +30,17 @@ def _check_tf_version():
         "TF version {} is too old to run multi GPU training!".format(tf.VERSION)
 
 
-def apply_prefetch_policy(config, use_stage=True):
+def apply_prefetch_policy(config, gpu_prefetch=True):
+    assert (config.data is not None or config.dataflow is not None) and config.model is not None
     if config.data is None and config.dataflow is not None:
+        # always use Queue prefetch
         config.data = QueueInput(config.dataflow)
         config.dataflow = None
-    if len(config.tower) > 1 and use_stage:
+    if len(config.tower) > 1 and gpu_prefetch:
         assert tf.test.is_gpu_available()
 
         # seem to only improve on >1 GPUs
-        if not isinstance(config.data, StagingInputWrapper):
+        if not isinstance(config.data, (StagingInputWrapper, DummyConstantInput)):
             devices = ['/gpu:{}'.format(k) for k in config.tower]
             config.data = StagingInputWrapper(config.data, devices)
 
@@ -51,43 +50,39 @@ class MultiGPUTrainerBase(Trainer):
     @staticmethod
     def build_on_multi_tower(
             towers, func,
-            devices=None, var_strategy='shared',
-            vs_names=None):
+            devices=None,
+            use_vs=None):
         """
         Args:
             towers: list of gpu relative ids
             func: a lambda to be called inside each tower
-            devices: a list of devices to be used. By default will use GPUs in towers.
-            var_strategy (str): 'shared' or 'replicated'
-            vs_names (list[str]): list of variable scope names to use.
+            devices: a list of devices to be used. By default will use GPUs in ``towers``.
+            use_vs (list[bool]): list of use_vs to passed to TowerContext
 
         Returns:
             List of outputs of ``func``, evaluated on each tower.
         """
-        logger.info("Training a model of {} tower".format(len(towers)))
         if len(towers) > 1:
+            logger.info("Training a model of {} towers".format(len(towers)))
             _check_tf_version()
 
         ret = []
         if devices is not None:
             assert len(devices) == len(towers)
 
+        tower_names = ['tower{}'.format(idx) for idx in range(len(towers))]
         keys_to_freeze = TOWER_FREEZE_KEYS[:]
-        if var_strategy == 'replicated':        # TODO ugly
-            logger.info("In replicated mode, UPDATE_OPS from all GPUs will be run.")
-            keys_to_freeze.remove(tf.GraphKeys.UPDATE_OPS)
-        else:
-            assert vs_names is None
-        if vs_names is None:
-            vs_names = [None] * len(towers)
+        if use_vs is None:
+            use_vs = [False] * len(towers)
+        assert len(use_vs) == len(towers)
 
         for idx, t in enumerate(towers):
             device = devices[idx] if devices is not None else '/gpu:{}'.format(t)
-            with TowerContext(
-                    'tower{}'.format(idx),
-                    device=device, is_training=True,
-                    var_strategy=var_strategy,
-                    vs_name=vs_names[idx]):
+            with tf.device(device), TowerContext(
+                    tower_names[idx],
+                    is_training=True,
+                    index=idx,
+                    use_vs=use_vs[idx]):
                 if idx == t:
                     logger.info("Building graph for training tower {}...".format(idx))
                 else:
@@ -102,16 +97,18 @@ class MultiGPUTrainerBase(Trainer):
         return ret
 
     @staticmethod
-    def check_none_grads(name, grads):
-        # grads: list of N grads
-        nones = list(set(grads))
-        if None in nones:
-            if len(nones) != 1:
-                raise RuntimeError("Gradient w.r.t {} is None in some but not all towers!".format(name))
-            else:
-                logger.warn("No Gradient w.r.t {}".format(name))
-                return False
-        return True
+    def _check_grad_list(grad_list):
+        """
+        Args:
+            grad_list: list of list of tuples, shape is Ngpu x Nvar x 2
+        """
+        nvars = [len(k) for k in grad_list]
+        assert len(set(nvars)) == 1, "Number of gradients from each tower is different! " + str(nvars)
+
+    @staticmethod
+    def _build_graph_get_grads(model, input):
+        model.build_graph(input)
+        return model.get_cost_and_grad()[1]
 
 
 # Copied from https://github.com/tensorflow/benchmarks/blob/master/scripts/tf_cnn_benchmarks/variable_mgr.py
@@ -128,10 +125,13 @@ class LeastLoadedDeviceSetter(object):
         self.ps_sizes = [0] * len(self.ps_devices)
 
     def __call__(self, op):
+        def sanitize_name(name):    # tensorflow/tensorflow#11484
+            return tf.DeviceSpec.from_string(name).to_string()
+
         if op.device:
             return op.device
         if op.type not in ['Variable', 'VariableV2']:
-            return self.worker_device
+            return sanitize_name(self.worker_device)
 
         device_index, _ = min(enumerate(
             self.ps_sizes), key=operator.itemgetter(1))
@@ -139,23 +139,26 @@ class LeastLoadedDeviceSetter(object):
         var_size = op.outputs[0].get_shape().num_elements()
         self.ps_sizes[device_index] += var_size
 
-        return device_name
+        return sanitize_name(device_name)
 
 
-class SyncMultiGPUTrainerParameterServer(MultiGPUTrainerBase, SingleCostFeedfreeTrainer):
+class SyncMultiGPUTrainerParameterServer(MultiGPUTrainerBase):
     """
-    A data-parallel Multi-GPU trainer which synchronoizes the gradients computed
-    from each tower, averages them and update to variables stored across all
-    GPUs or on CPU.
+    A data-parallel multi-GPU trainer. It builds one tower on each GPU with
+    shared variable scope. It synchronoizes the gradients computed
+    from each tower, averages them and applies to the shared variables.
+
+    See https://www.tensorflow.org/performance/benchmarks for details.
     """
 
-    def __init__(self, config, ps_device='gpu'):
+    def __init__(self, config, ps_device='gpu', gpu_prefetch=True):
         """
         Args:
-            config: same as in :class:`QueueInputTrainer`.
-            ps_device: either 'gpu' or 'cpu', where variables are stored.
+            config(TrainConfig): Must contain 'model' and either one of 'data' or 'dataflow'.
+            ps_device: either 'gpu' or 'cpu', where variables are stored.  Setting to 'cpu' might help when #gpu>=4
+            gpu_prefetch(bool): whether to prefetch the data to each GPU. Usually improve performance.
         """
-        apply_prefetch_policy(config)
+        apply_prefetch_policy(config, gpu_prefetch)
         self._input_source = config.data
 
         assert ps_device in ['gpu', 'cpu'], ps_device
@@ -175,54 +178,81 @@ class SyncMultiGPUTrainerParameterServer(MultiGPUTrainerBase, SingleCostFeedfree
                 v = grad_and_vars[0][1]
                 all_grads = [g for (g, _) in grad_and_vars]
 
-                if not MultiGPUTrainerBase.check_none_grads(v.op.name, all_grads):
-                    continue
                 with tf.device(v.device):       # colocate summed grad with var
                     grad = tf.multiply(
                         tf.add_n(all_grads), 1.0 / nr_tower)
                     new_tower_grads.append((grad, v))
         return new_tower_grads
 
-    def _setup(self):
-        super(SyncMultiGPUTrainerParameterServer, self)._setup()
+    @staticmethod
+    def setup_graph(model, input, ps_device, tower):
+        """
+        Args:
+            model (ModelDesc):
+            input (InputSource):
+            ps_device (str):
+            tower (list[int]):
 
-        raw_devices = ['/gpu:{}'.format(k) for k in self.config.tower]
-        if self._ps_device == 'gpu':
+        Returns:
+            tf.Operation: the training op
+
+            [Callback]: the callbacks to be added
+        """
+        callbacks = input.setup(model.get_inputs_desc())
+
+        raw_devices = ['/gpu:{}'.format(k) for k in tower]
+        if ps_device == 'gpu':
             devices = [LeastLoadedDeviceSetter(d, raw_devices) for d in raw_devices]
         else:
             devices = [tf.train.replica_device_setter(
                 worker_device=d, ps_device='/cpu:0', ps_tasks=1) for d in raw_devices]
 
         grad_list = MultiGPUTrainerBase.build_on_multi_tower(
-            self.config.tower, lambda: self._get_cost_and_grad()[1], devices)
+            tower,
+            lambda: MultiGPUTrainerBase._build_graph_get_grads(model, input),
+            devices)
+        MultiGPUTrainerBase._check_grad_list(grad_list)
 
         # debug tower performance (without update):
         # ops = [k[0] for k in grad_list[1]] + [k[0] for k in grad_list[0]]
         # self.train_op = tf.group(*ops)
         # return
 
-        grads = self._average_grads(grad_list)
+        grads = SyncMultiGPUTrainerParameterServer._average_grads(grad_list)
         # grads = grad_list[0]
 
-        self.train_op = self.model.get_optimizer().apply_gradients(
-            grads, name='train_op')
+        train_op = model.get_optimizer().apply_gradients(grads, name='train_op')
+        return train_op, callbacks
+
+    def _setup(self):
+        self.train_op, cbs = SyncMultiGPUTrainerParameterServer.setup_graph(
+            self.model, self._input_source, self._ps_device, self.config.tower)
+        self.config.callbacks.extend(cbs)
 
 
 def SyncMultiGPUTrainer(config):
     """
     Alias for ``SyncMultiGPUTrainerParameterServer(config, ps_device='gpu')``,
-    as this is the most commonly used synchronous multigpu trainer.
+    as this is the most commonly used synchronous multigpu trainer (but may
+    not be more efficient than the other).
     """
     return SyncMultiGPUTrainerParameterServer(config, ps_device='gpu')
 
 
-class SyncMultiGPUTrainerReplicated(MultiGPUTrainerBase, SingleCostFeedfreeTrainer):
+class SyncMultiGPUTrainerReplicated(MultiGPUTrainerBase):
     """
-    Data-parallel Multi-GPU trainer where each GPU contains a replicate of the
-    whole model. Each gradient update is broadcast and synced.
+    Data-parallel multi-GPU trainer where each GPU contains a replicate of the whole model.
+    It will build one tower on each GPU under its own variable scope.
+    Each gradient update is averaged across or GPUs through NCCL.
+
+    See https://www.tensorflow.org/performance/benchmarks for details.
     """
-    def __init__(self, config):
-        apply_prefetch_policy(config)
+    def __init__(self, config, gpu_prefetch=True):
+        """
+        Args:
+            config, gpu_prefetch: same as in :class:`SyncMultiGPUTrainerParameterServer`
+        """
+        apply_prefetch_policy(config, gpu_prefetch)
         self._input_source = config.data
         logger.warn("Note that SyncMultiGPUTrainerReplicated doesn't support inference.")
         super(SyncMultiGPUTrainerReplicated, self).__init__(config)
@@ -232,146 +262,155 @@ class SyncMultiGPUTrainerReplicated(MultiGPUTrainerBase, SingleCostFeedfreeTrain
         from tensorflow.contrib import nccl
         nr_tower = len(tower_grads)
         if nr_tower == 1:
-            return tower_grads[0]
+            return [[x] for x in tower_grads[0]]
         new_tower_grads = []
         with tf.name_scope('AvgGrad'):
             for grad_and_vars in zip(*tower_grads):
                 v = grad_and_vars[0][1]
                 grads = [g for g, _ in grad_and_vars]
-                if not MultiGPUTrainerBase.check_none_grads(v.op.name, grads):
-                    continue
                 summed = nccl.all_sum(grads)
 
                 grads_for_a_var = []
                 for (_, v), g in zip(grad_and_vars, summed):
-                    g = tf.multiply(g, 1.0 / nr_tower)
-                    grads_for_a_var.append((g, v))
+                    with tf.device(g.device):
+                        g = tf.multiply(g, 1.0 / nr_tower)
+                        grads_for_a_var.append((g, v))
                 new_tower_grads.append(grads_for_a_var)
         # NVar * NGPU * 2
         return new_tower_grads
 
-    def _setup(self):
-        super(SyncMultiGPUTrainerReplicated, self)._setup()
-        raw_devices = ['/gpu:{}'.format(k) for k in self.config.tower]
+    @staticmethod
+    def setup_graph(model, input, tower):
+        """
+        Args:
+            model (ModelDesc):
+            input (InputSource):
+            tower (list[int]):
+
+        Returns:
+            tf.Operation: the training op
+
+            [Callback]: the callbacks to be added
+        """
+        callbacks = input.setup(model.get_inputs_desc())
+
+        raw_devices = ['/gpu:{}'.format(k) for k in tower]
 
         grad_list = MultiGPUTrainerBase.build_on_multi_tower(
-            self.config.tower,
-            lambda: self._get_cost_and_grad()[1],
-            var_strategy='replicated',
+            tower,
+            lambda: MultiGPUTrainerBase._build_graph_get_grads(model, input),
             # use no variable scope for the first tower
-            vs_names=[''] + [None] * (self.config.nr_tower - 1))
-        grads = self._allreduce_grads(grad_list)
+            use_vs=[False] + [True] * (len(tower) - 1))
+        grads = SyncMultiGPUTrainerReplicated._allreduce_grads(grad_list)
 
         train_ops = []
-        opt = self.model.get_optimizer()
-        for idx in range(self.config.nr_tower):
+        opt = model.get_optimizer()
+        for idx in range(len(tower)):
             with tf.device(raw_devices[idx]):
                 grad_and_vars = [x[idx] for x in grads]
                 train_ops.append(opt.apply_gradients(
                     grad_and_vars, name='apply_grad_{}'.format(idx)))
-        self.train_op = tf.group(*train_ops, name='train_op')
-        self.register_callback(RunOp(
+        train_op = tf.group(*train_ops, name='train_op')
+        cb = RunOp(
             SyncMultiGPUTrainerReplicated.get_post_init_ops,
-            run_before=True, run_as_trigger=True, verbose=True))
+            run_before=True, run_as_trigger=True, verbose=True)
+        return train_op, callbacks + [cb]
 
+    def _setup(self):
+        self.train_op, cbs = SyncMultiGPUTrainerReplicated.setup_graph(
+            self.model, self._input_source, self.config.tower)
+        self.config.callbacks.extend(cbs)
 
 # Adopt from https://github.com/tensorflow/benchmarks/blob/master/scripts/tf_cnn_benchmarks/variable_mgr.py
     @staticmethod
     def get_post_init_ops():
         # Copy initialized values for variables on GPU 0 to other GPUs.
-        global_vars = tf.global_variables()
-        var_by_name = dict([(v.name, v) for v in global_vars])
+        all_vars = tf.trainable_variables()
+        all_vars.extend(tf.model_variables())
+        var_by_name = dict([(v.name, v) for v in all_vars])
         post_init_ops = []
-        for v in global_vars:
+        for v in all_vars:
             split_name = v.name.split('/')
             if not v.name.startswith('tower'):
                 continue
-            # the master name doesn't have the towerx/ prefix
+            if v.name.startswith('tower0'):
+                continue        # TODO some vars (EMA) may still startswith tower0
+            # in this trainer, the master name doesn't have the towerx/ prefix
             split_name = split_name[1:]
             copy_from = var_by_name['/'.join(split_name)]
             post_init_ops.append(v.assign(copy_from.read_value()))
+        logger.info(
+            "'sync_variables_from_tower0' includes {} operations.".format(len(post_init_ops)))
         return tf.group(*post_init_ops, name='sync_variables_from_tower0')
 
 
-class AsyncMultiGPUTrainer(MultiGPUTrainerBase,
-                           SingleCostFeedfreeTrainer):
+class AsyncMultiGPUTrainer(MultiGPUTrainerBase):
     """
-    A multi-tower multi-GPU trainer where each tower independently
-    asynchronously updates the model without locking.
+    A data-parallel multi-GPU trainer. It builds one tower on each GPU with shared variable scope.
+    Every tower computes the gradients and independently applies them to the
+    variables, without synchronizing and averaging across towers.
     """
 
-    def __init__(self, config,
-                 scale_gradient=True):
+    def __init__(self, config, scale_gradient=True):
         """
         Args:
-            config: same as in :class:`QueueInputTrainer`.
-            scale_gradient (bool): if True, will scale each gradient by
-                ``1.0/nr_tower``, to make Async and Sync Trainer have the same
-                effective learning rate.
+            config(TrainConfig): Must contain 'model' and either one of 'data' or 'dataflow'.
+            scale_gradient (bool): if True, will scale each gradient by ``1.0/nr_gpu``.
         """
-        apply_prefetch_policy(config, use_stage=False)
-        logger.warn("Async training hasn't been well optimized. Sync training is even faster")
+        apply_prefetch_policy(config)
         self._input_source = config.data
+        self._scale_gradient = scale_gradient
         super(AsyncMultiGPUTrainer, self).__init__(config)
 
-        self._scale_gradient = scale_gradient
+    @staticmethod
+    def setup_graph(model, input, scale_gradient, tower):
+        """
+        Args:
+            model (ModelDesc):
+            input (InputSource):
+            scale_gradient (bool):
+            tower (list[int]):
 
-        if len(config.tower) > 1:
-            assert tf.test.is_gpu_available()
+        Returns:
+            tf.Operation: the training op
 
-    def _setup(self):
-        super(AsyncMultiGPUTrainer, self)._setup()
+            [Callback]: the callbacks to be added
+        """
+        callbacks = input.setup(model.get_inputs_desc())
+
+        ps_device = 'cpu' if len(tower) >= 4 else 'gpu'
+
+        if ps_device == 'gpu':
+            raw_devices = ['/gpu:{}'.format(k) for k in tower]
+            devices = [LeastLoadedDeviceSetter(d, raw_devices) for d in raw_devices]
+        else:
+            devices = [tf.train.replica_device_setter(
+                worker_device=d, ps_device='/cpu:0', ps_tasks=1) for d in raw_devices]
         grad_list = MultiGPUTrainerBase.build_on_multi_tower(
-            self.config.tower, lambda: self._get_cost_and_grad()[1])
-        grad_list = [FilterNoneGrad().process(gv) for gv in grad_list]
-        if self._scale_gradient and self.config.nr_tower > 1:
+            tower,
+            lambda: MultiGPUTrainerBase._build_graph_get_grads(model, input), devices)
+        MultiGPUTrainerBase._check_grad_list(grad_list)
+
+        if scale_gradient and len(tower) > 1:
             # pretend to average the grads, in order to make async and
             # sync have consistent effective learning rate
-            gradproc = ScaleGradient(('.*', 1.0 / self.config.nr_tower), log=False)
+            gradproc = ScaleGradient(('.*', 1.0 / len(tower)), verbose=False)
             grad_list = [gradproc.process(gv) for gv in grad_list]
+        # Ngpu x Nvar x 2
 
-        # use grad from the first tower for iteration in main thread
-        self._opt = self.model.get_optimizer()
-        self.train_op = self._opt.apply_gradients(grad_list[0], name='min_op')
+        train_ops = []
+        opt = model.get_optimizer()
+        with tf.name_scope('async_apply_gradients'):
+            for i, grad_and_vars in enumerate(zip(*grad_list)):
+                # Ngpu x 2
+                v = grad_and_vars[0][1]
+                with tf.device(v.device):
+                    # will call apply_gradients (therefore gradproc) multiple times
+                    train_ops.append(opt.apply_gradients(
+                        grad_and_vars, name='apply_grad_{}'.format(i)))
+            return tf.group(*train_ops, name='train_op'), callbacks
 
-        self._start_async_threads(grad_list)
-
-    def _start_async_threads(self, grad_list):
-        # prepare train_op for the rest of the towers
-        # itertools.count is atomic w.r.t. python threads
-        self.async_step_counter = itertools.count()
-        self.training_threads = []
-        for k in range(1, self.config.nr_tower):
-            train_op = self._opt.apply_gradients(grad_list[k])
-
-            def f(op=train_op):  # avoid late-binding
-                self.sess.run([op])         # TODO this won't work with StageInput
-                next(self.async_step_counter)   # atomic due to GIL
-            th = LoopThread(f)
-            th.name = "AsyncLoopThread-{}".format(k)
-            th.pause()
-            th.start()
-            self.training_threads.append(th)
-        self.async_running = False
-
-    def run_step(self):
-        if not self.async_running:
-            self.async_running = True
-            for th in self.training_threads:  # resume all threads
-                th.resume()
-        next(self.async_step_counter)
-        return super(AsyncMultiGPUTrainer, self).run_step()
-
-    def _trigger_epoch(self):
-        self.async_running = False
-        for th in self.training_threads:
-            th.pause()
-        try:
-            if self.config.nr_tower > 1:
-                async_step_total_cnt = int(re.findall(
-                    '[0-9]+', self.async_step_counter.__str__())[0])
-                self.monitors.put(
-                    'async_global_step', async_step_total_cnt)
-        except:
-            logger.exception("Cannot log async_global_step")
-        super(AsyncMultiGPUTrainer, self)._trigger_epoch()
+    def _setup(self):
+        self.train_op, cbs = AsyncMultiGPUTrainer.setup_graph(
+            self.model, self._input_source, self._scale_gradient, self.config.tower)
+        self.config.callbacks.extend(cbs)

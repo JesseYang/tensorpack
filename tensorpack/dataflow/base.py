@@ -3,12 +3,39 @@
 # File: base.py
 # Author: Yuxin Wu <ppwwyyxx@gmail.com>
 
-
+import threading
 from abc import abstractmethod, ABCMeta
 import six
-from ..utils import get_rng
+from ..utils.utils import get_rng
 
-__all__ = ['DataFlow', 'ProxyDataFlow', 'RNGDataFlow']
+__all__ = ['DataFlow', 'ProxyDataFlow', 'RNGDataFlow', 'DataFlowTerminated']
+
+
+class DataFlowTerminated(BaseException):
+    """
+    An exception indicating that the DataFlow is unable to produce any more
+    data, i.e. something wrong happened so that calling :meth:`get_data`
+    cannot give a valid iterator any more.
+    In most DataFlow this will never be raised.
+    """
+    pass
+
+
+class DataFlowReentrantGuard(object):
+    """
+    A tool to enforce thread-level non-reentrancy on DataFlow.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        self._succ = self._lock.acquire(False)
+        if not self._succ:
+            raise threading.ThreadError("This DataFlow cannot be reused under different threads!")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
+        return False
 
 
 @six.add_metaclass(ABCMeta)
@@ -54,7 +81,9 @@ class RNGDataFlow(DataFlow):
 
 
 class ProxyDataFlow(DataFlow):
-    """ Base class for DataFlow that proxies another"""
+    """ Base class for DataFlow that proxies another.
+        Every method is proxied to ``self.ds`` unless override by subclass.
+    """
 
     def __init__(self, ds):
         """
@@ -64,10 +93,10 @@ class ProxyDataFlow(DataFlow):
         self.ds = ds
 
     def reset_state(self):
-        """
-        Reset state of the proxied DataFlow.
-        """
         self.ds.reset_state()
 
     def size(self):
         return self.ds.size()
+
+    def get_data(self):
+        return self.ds.get_data()

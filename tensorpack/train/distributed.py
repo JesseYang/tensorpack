@@ -8,13 +8,12 @@ import os
 from six.moves import range
 
 from ..utils import logger
-from .feedfree import SingleCostFeedfreeTrainer
 from .multigpu import MultiGPUTrainerBase
 from ..callbacks import RunOp
 from ..tfutils.sesscreate import NewSessionCreator
 from ..tfutils.common import get_global_step_var, get_op_tensor_name
 
-__all__ = ['DistributedReplicatedTrainer']
+__all__ = ['DistributedReplicatedTrainer', 'DistributedTrainerReplicated']
 
 
 class OverrideToLocalVariable(object):
@@ -35,7 +34,7 @@ class OverrideToLocalVariable(object):
         return getter(name, *args, **kwargs)
 
 
-class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
+class DistributedTrainerReplicated(MultiGPUTrainerBase):
     """
     Distributed replicated training.
     Each worker process builds the same model on one or more GPUs.
@@ -43,17 +42,41 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
     and get synchronously applied to the global copy of variables located on PS.
     Then each worker copy the latest variables from PS back to local.
 
+    See https://www.tensorflow.org/performance/benchmarks for details.
 
     Note:
-        Gradients are not averaged across workers.
+        Gradients are not averaged across workers, but applied to PS variables
+        directly (either with or without locking depending on the optimizer).
+
+    Example:
+
+        .. code-block:: python
+
+            hosts = ['host1.com', 'host2.com']
+            cluster_spec = tf.train.ClusterSpec({
+                'ps': [h + ':2222' for h in hosts],
+                'worker': [h + ':2223' for h in hosts]
+            })
+            server = tf.train.Server(
+                cluster_spec, job_name=args.job, task_index=args.task,
+                config=get_default_sess_config())
+            DistributedTrainerReplicated(config, server).train()
+
+        .. code-block:: none
+
+            # start your jobs:
+            (host1)$ train.py --job worker --task 0
+            (host1)$ train.py --job ps --task 0
+            (host2)$ train.py --job worker --task 1
+            (host2)$ train.py --job ps --task 1
     """
     def __init__(self, config, server):
         """
         Args:
-            config (TrainConfig): the train config.
-            server (tf.train.Server): the server object with ps and workers
+            config(TrainConfig): Must contain 'model' and 'data'.
+            server(tf.train.Server): the server object with ps and workers
         """
-
+        assert config.data is not None and config.model is not None
         self.server = server
         server_def = server.server_def
         self.cluster = tf.train.ClusterSpec(server_def.cluster)
@@ -61,10 +84,11 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
         self.task_index = server_def.task_index
         assert self.job_name in ['ps', 'worker'], self.job_name
         assert tf.test.is_gpu_available
+        logger.info("Distributed training on cluster:\n" + str(server_def.cluster))
+        logger.info("My role in the cluster: job={}, task={}".format(self.job_name, self.task_index))
 
         self._input_source = config.data
         self.is_chief = (self.task_index == 0 and self.job_name == 'worker')
-        super(DistributedReplicatedTrainer, self).__init__(config)
 
         worker_prefix = '/job:worker/task:%s' % self.task_index
         self.param_server_device = tf.train.replica_device_setter(
@@ -80,10 +104,13 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
         self.sync_queue_devices = ['/job:ps/task:%s/cpu:0' % i for i in range(self.num_ps)]
         self.sync_queue_counter = 0
 
+        super(DistributedTrainerReplicated, self).__init__(config)
+
     @staticmethod
     def _average_grads(tower_grads, devices):
         """
-        Average grad with round-robin device selection.
+        Average grads from towers.
+        The device where the average happens is chosen with round-robin.
 
         Args:
             tower_grads: Ngpu x Nvar x 2
@@ -102,8 +129,6 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
                     v = grad_and_vars[0][1]
                     # average gradient
                     all_grads = [g for (g, _) in grad_and_vars]
-                    if not MultiGPUTrainerBase.check_none_grads(v.op.name, all_grads):
-                        continue
                     grad = tf.multiply(
                         tf.add_n(all_grads), 1.0 / nr_device)
                     new_tower_grads.append((grad, v))
@@ -112,7 +137,11 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
     @staticmethod
     def _apply_shadow_vars(avg_grads):
         """
-        Replace variables in avg_grads by shadow variables.
+        Create shadow variables on PS, and replace variables in avg_grads
+        by these shadow variables.
+
+        Args:
+            avg_grads: list of (grad, var) tuples
         """
         ps_var_grads = []
         for grad, var in avg_grads:
@@ -153,6 +182,9 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
 
     def _apply_gradients_and_copy(self, raw_grad_list, ps_var_grads):
         """
+        Apply averaged gradients to ps vars, and then copy the updated
+        variables back to each tower.
+
         Args:
             raw_grad_list: Ngpu x Nvar x 2 gradient list from all towers
             ps_var_grads: Nvar x 2 (grad, ps_var)
@@ -179,13 +211,14 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
         if self.job_name == 'ps':
             logger.info("Running ps {}".format(self.task_index))
             logger.info("Kill me with 'kill {}'".format(os.getpid()))
-            self.server.join()  # this will never return #4713
+            self.server.join()  # this will never return tensorflow#4713
             return
         with tf.device(self.param_server_device):
             gs = get_global_step_var()
             assert gs.device, gs.device
-        # do this before super.setup because input_source my need global step
-        super(DistributedReplicatedTrainer, self)._setup()
+        # do this before inputsource.setup because input_source my need global step
+        cbs = self._input_source.setup(self.model.get_inputs_desc())
+        self.config.callbacks.extend(cbs)
 
         with tf.variable_scope(
                 tf.get_variable_scope(),
@@ -193,17 +226,18 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
             # Ngpu * Nvar * 2
             grad_list = MultiGPUTrainerBase.build_on_multi_tower(
                 self.config.tower,
-                lambda: self._get_cost_and_grad()[1],
+                lambda: MultiGPUTrainerBase._build_graph_get_grads(
+                    self.model, self._input_source),
                 devices=self.raw_devices,
-                var_strategy='replicated',
-                vs_names=None)  # use the default vs names
+                use_vs=[True] * self.config.nr_tower)  # open vs at each tower
+            MultiGPUTrainerBase._check_grad_list(grad_list)
 
-        avg_grads = DistributedReplicatedTrainer._average_grads(grad_list, self.raw_devices)
+        avg_grads = DistributedTrainerReplicated._average_grads(grad_list, self.raw_devices)
         with tf.device(self.param_server_device):
-            ps_var_grads = DistributedReplicatedTrainer._apply_shadow_vars(avg_grads)
+            ps_var_grads = DistributedTrainerReplicated._apply_shadow_vars(avg_grads)
             var_update_ops = self._apply_gradients_and_copy(grad_list, ps_var_grads)
             self._shadow_vars = [v for (_, v) in ps_var_grads]
-            self._shadow_model_vars = DistributedReplicatedTrainer._shadow_model_variables(self._shadow_vars)
+            self._shadow_model_vars = DistributedTrainerReplicated._shadow_model_variables(self._shadow_vars)
 
         # TODO add options to synchronize less
         main_fetch = tf.group(*var_update_ops, name='main_fetches')
@@ -221,7 +255,7 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
             cb = RunOp(self._get_sync_model_vars_op,
                        run_before=False, run_as_trigger=True, verbose=True)
             logger.warn("For efficiency, local MODEL_VARIABLES are only synced to PS once "
-                        "every epoch. Be careful if you save the model more frequenctly.")
+                        "every epoch. Be careful if you save the model more frequently than this.")
             self.register_callback(cb)
 
         self._set_session_creator()
@@ -319,3 +353,8 @@ class DistributedReplicatedTrainer(SingleCostFeedfreeTrainer):
     @property
     def vs_name_for_predictor(self):
         return "tower0"
+
+
+def DistributedReplicatedTrainer(*args, **kwargs):
+    logger.warn("DistributedReplicatedTrainer was renamed to DistributedTrainerReplicated!")
+    return DistributedTrainerReplicated(*args, **kwargs)

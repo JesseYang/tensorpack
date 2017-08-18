@@ -5,9 +5,10 @@
 
 import time
 from collections import deque
-from .base import DataFlow
-from ..utils import logger, get_tqdm
-from ..utils.serialize import dumps, loads, dumps_for_tfop
+from .base import DataFlow, DataFlowReentrantGuard
+from ..utils import logger
+from ..utils.utils import get_tqdm
+from ..utils.serialize import dumps, loads
 try:
     import zmq
 except ImportError:
@@ -17,7 +18,7 @@ else:
     __all__ = ['send_dataflow_zmq', 'RemoteDataZMQ']
 
 
-def send_dataflow_zmq(df, addr, hwm=50, print_interval=100, format='msgpack'):
+def send_dataflow_zmq(df, addr, hwm=50, print_interval=100, format=None):
     """
     Run DataFlow and send data to a ZMQ socket addr.
     It will dump and send each datapoint to this addr with a PUSH socket.
@@ -26,11 +27,11 @@ def send_dataflow_zmq(df, addr, hwm=50, print_interval=100, format='msgpack'):
         df (DataFlow): Will infinitely loop over the DataFlow.
         addr: a ZMQ socket addr.
         hwm (int): high water mark
-        format (str): The serialization format.
-            'msgpack' is the default format corresponding to RemoteDataZMQ.
-            Otherwise will use the format corresponding to the ZMQRecv TensorFlow Op.
     """
-    dump_fn = dumps if format == 'msgpack' else dumps_for_tfop
+    # format (str): The serialization format. ZMQ Op is still not publicly usable now
+    #     Default format would use :mod:`tensorpack.utils.serialize`.
+    # dump_fn = dumps if format is None else dumps_for_tfop
+    dump_fn = dumps
     ctx = zmq.Context()
     socket = ctx.socket(zmq.PUSH)
     socket.set_hwm(hwm)
@@ -72,47 +73,49 @@ class RemoteDataZMQ(DataFlow):
         assert addr1
         self._addr1 = addr1
         self._addr2 = addr2
+        self._guard = DataFlowReentrantGuard()
 
     def reset_state(self):
         self.cnt1 = 0
         self.cnt2 = 0
 
     def get_data(self):
-        try:
-            ctx = zmq.Context()
-            if self._addr2 is None:
-                socket = ctx.socket(zmq.PULL)
-                socket.set_hwm(50)
-                socket.bind(self._addr1)
+        with self._guard:
+            try:
+                ctx = zmq.Context()
+                if self._addr2 is None:
+                    socket = ctx.socket(zmq.PULL)
+                    socket.set_hwm(50)
+                    socket.bind(self._addr1)
 
-                while True:
-                    dp = loads(socket.recv(copy=False).bytes)
-                    yield dp
-                    self.cnt1 += 1
-            else:
-                socket1 = ctx.socket(zmq.PULL)
-                socket1.set_hwm(50)
-                socket1.bind(self._addr1)
-
-                socket2 = ctx.socket(zmq.PULL)
-                socket2.set_hwm(50)
-                socket2.bind(self._addr2)
-
-                poller = zmq.Poller()
-                poller.register(socket1, zmq.POLLIN)
-                poller.register(socket2, zmq.POLLIN)
-
-                while True:
-                    evts = poller.poll()
-                    for sock, evt in evts:
-                        dp = loads(sock.recv(copy=False).bytes)
+                    while True:
+                        dp = loads(socket.recv(copy=False).bytes)
                         yield dp
-                        if sock == socket1:
-                            self.cnt1 += 1
-                        else:
-                            self.cnt2 += 1
-        finally:
-            ctx.destroy(linger=0)
+                        self.cnt1 += 1
+                else:
+                    socket1 = ctx.socket(zmq.PULL)
+                    socket1.set_hwm(50)
+                    socket1.bind(self._addr1)
+
+                    socket2 = ctx.socket(zmq.PULL)
+                    socket2.set_hwm(50)
+                    socket2.bind(self._addr2)
+
+                    poller = zmq.Poller()
+                    poller.register(socket1, zmq.POLLIN)
+                    poller.register(socket2, zmq.POLLIN)
+
+                    while True:
+                        evts = poller.poll()
+                        for sock, evt in evts:
+                            dp = loads(sock.recv(copy=False).bytes)
+                            yield dp
+                            if sock == socket1:
+                                self.cnt1 += 1
+                            else:
+                                self.cnt2 += 1
+            finally:
+                ctx.destroy(linger=0)
 
 
 if __name__ == '__main__':

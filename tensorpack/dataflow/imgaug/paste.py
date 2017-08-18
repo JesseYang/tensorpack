@@ -45,7 +45,7 @@ class ConstantBackgroundFiller(BackgroundFiller):
     def _fill(self, background_shape, img):
         assert img.ndim in [3, 2]
         if img.ndim == 3:
-            return_shape = background_shape + (3,)
+            return_shape = background_shape + (img.shape[2],)
         else:
             return_shape = background_shape
         return np.zeros(return_shape) + self.value
@@ -78,7 +78,7 @@ class CenterPaste(ImageAugmentor):
         background[y0:y0 + img_shape[0], x0:x0 + img_shape[1]] = img
         return background
 
-    def _fprop_coord(self, coord, param):
+    def _augment_coords(self, coords, param):
         raise NotImplementedError()
 
 

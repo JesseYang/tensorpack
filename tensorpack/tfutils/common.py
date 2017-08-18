@@ -10,10 +10,10 @@ from ..utils.argtools import graph_memoized
 __all__ = ['get_default_sess_config',
            'get_global_step_value',
            'get_global_step_var',
-           'get_op_tensor_name',
-           'get_tensors_by_names',
-           'get_op_or_tensor_by_name',
-           'get_tf_version_number',
+           # 'get_op_tensor_name',
+           # 'get_tensors_by_names',
+           # 'get_op_or_tensor_by_name',
+           # 'get_tf_version_number',
            ]
 
 
@@ -44,7 +44,8 @@ def get_default_sess_config(mem_fraction=0.99):
     conf.gpu_options.allocator_type = 'BFC'
     conf.gpu_options.allow_growth = True
 
-    conf.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+    # Hurt performance in 8xP100 training
+    # conf.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
     return conf
 
 
@@ -77,15 +78,6 @@ def get_global_step_value():
     return tf.train.global_step(
         tf.get_default_session(),
         get_global_step_var())
-
-
-# @memoized
-# def get_local_step_var():
-#     try:
-#         return tf.get_default_graph().get_tensor_by_name(LOCAL_STEP_VAR_NAME)
-#     except KeyError:
-#         logger.warn("get_local_step_var() is only available to use in callbacks!")
-#         raise
 
 
 def get_op_tensor_name(name):

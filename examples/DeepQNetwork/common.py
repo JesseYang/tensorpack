@@ -13,6 +13,7 @@ from six.moves import queue
 from tensorpack import *
 from tensorpack.utils.concurrency import *
 from tensorpack.utils.stats import *
+from tensorpack.utils.utils import get_tqdm_kwargs
 
 
 def play_one_episode(player, func, verbose=False):
@@ -52,7 +53,7 @@ def eval_with_funcs(predictors, nr_eval, get_player_fn):
                 while not self.stopped():
                     try:
                         score = play_one_episode(player, self.func)
-                        # print "Score, ", score
+                        # print("Score, ", score)
                     except RuntimeError:
                         return
                     self.queue_put_stoppable(self.q, score)
@@ -110,8 +111,8 @@ class Evaluator(Triggerable):
         t = time.time() - t
         if t > 10 * 60:  # eval takes too long
             self.eval_episode = int(self.eval_episode * 0.94)
-        self.trainer.monitors.put('mean_score', mean)
-        self.trainer.monitors.put('max_score', max)
+        self.trainer.monitors.put_scalar('mean_score', mean)
+        self.trainer.monitors.put_scalar('max_score', max)
 
 
 def play_n_episodes(player, predfunc, nr):
@@ -120,4 +121,4 @@ def play_n_episodes(player, predfunc, nr):
         if k != 0:
             player.restart_episode()
         score = play_one_episode(player, predfunc)
-        print("{}/{}, score=", k, nr, score)
+        print("{}/{}, score={}".format(k, nr, score))

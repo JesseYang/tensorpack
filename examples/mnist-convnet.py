@@ -6,6 +6,7 @@ import numpy as np
 import os
 import sys
 import argparse
+import tensorflow as tf
 """
 MNIST ConvNet example.
 about 0.6% validation error after 30 epochs.
@@ -13,7 +14,8 @@ about 0.6% validation error after 30 epochs.
 
 # Just import everything into current namespace
 from tensorpack import *
-import tensorflow as tf
+from tensorpack.tfutils import summary
+from tensorpack.dataflow import dataset
 import tensorpack.tfutils.symbolic_functions as symbf
 
 IMAGE_SIZE = 28
@@ -102,9 +104,6 @@ def get_data():
 
 
 def get_config():
-    # automatically setup the directory train_log/mnist-convnet for logging
-    logger.auto_set_dir()
-
     dataset_train, dataset_test = get_data()
     # How many iterations you want in each epoch.
     # This is the default value, don't actually need to set it in the config
@@ -136,9 +135,12 @@ if __name__ == '__main__':
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
+    # automatically setup the directory train_log/mnist-convnet for logging
+    logger.auto_set_dir()
+
     config = get_config()
     if args.load:
         config.session_init = SaverRestore(args.load)
     # SimpleTrainer is slow, this is just a demo.
-    SimpleTrainer(config).train()
     # You can use QueueInputTrainer instead
+    SimpleTrainer(config).train()

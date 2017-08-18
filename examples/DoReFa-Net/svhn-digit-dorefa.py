@@ -10,6 +10,7 @@ import os
 from tensorpack import *
 from tensorpack.tfutils.symbolic_functions import *
 from tensorpack.tfutils.summary import *
+from tensorpack.dataflow import dataset
 from tensorpack.tfutils.varreplace import remap_variables
 import tensorflow as tf
 
@@ -190,6 +191,4 @@ if __name__ == '__main__':
     config = get_config()
     if args.load:
         config.session_init = SaverRestore(args.load)
-    if args.gpu:
-        config.nr_tower = len(args.gpu.split(','))
     QueueInputTrainer(config).train()

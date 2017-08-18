@@ -40,24 +40,47 @@ def regularize_cost(regex, func, name='regularize_cost'):
             cost = cost + regularize_cost("fc.*/W", l2_regularizer(1e-5))
     """
     ctx = get_current_tower_context()
-    G = tf.get_default_graph()
-    params = G.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+    params = tf.trainable_variables()
 
-    costs = []
-    for p in params:
-        para_name = p.name
-        # in replicated mode, only regularize variables inside this tower
-        if ctx.has_own_variables and ctx.vs_name and (not para_name.startswith(ctx.vs_name)):
-            continue
-        if re.search(regex, para_name):
-            costs.append(func(p))
-            _log_regularizer(para_name)
-    if not costs:
-        return tf.constant(0, dtype=tf.float32, name='empty_regularize_cost')
+    # If vars are shared, use all of them
+    # If vars are replicated, only regularize those in the current tower
+    params = ctx.filter_vars_by_vs_name(params)
+
+    with tf.name_scope('regularize_cost'):
+        costs = []
+        for p in params:
+            para_name = p.name
+            if re.search(regex, para_name):
+                costs.append(func(p))
+                _log_regularizer(para_name)
+        if not costs:
+            return tf.constant(0, dtype=tf.float32, name='empty_' + name)
     return tf.add_n(costs, name=name)
 
 
-@layer_register(log_shape=False, use_scope=False)
+def regularize_cost_from_collection(name='regularize_cost'):
+    """
+    Get the cost from the regularizers in ``tf.GraphKeys.REGULARIZATION_LOSSES``.
+    In replicated mode, will only regularize variables within the current tower.
+
+    Returns:
+        a scalar tensor, the regularization loss, or None
+    """
+    regularization_losses = set(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
+    ctx = get_current_tower_context()
+    if len(regularization_losses) > 0:
+        # NOTE: this collection doesn't grow with towers.
+        # It is only added with variables that are newly created.
+        if ctx.has_own_variables:   # be careful of the first tower (name='')
+            regularization_losses = ctx.filter_vars_by_vs_name(regularization_losses)
+        logger.info("Add REGULARIZATION_LOSSES of {} tensors on the total cost.".format(len(regularization_losses)))
+        reg_loss = tf.add_n(list(regularization_losses), name=name)
+        return reg_loss
+    else:
+        return None
+
+
+@layer_register(use_scope=None)
 def Dropout(x, keep_prob=0.5, is_training=None, noise_shape=None):
     """
     Dropout layer as in the paper `Dropout: a Simple Way to Prevent

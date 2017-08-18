@@ -3,14 +3,13 @@
 # Author: Yuxin Wu <ppwwyyxx@gmail.com>
 
 from .base import ImageAugmentor
-from ...utils.rect import Rect
+from ...utils.rect import IntBox
 from ...utils.argtools import shape2d
 
 from six.moves import range
 import numpy as np
 
-__all__ = ['RandomCrop', 'CenterCrop',
-           'perturb_BB', 'RandomCropAroundBox', 'RandomCropRandomShape']
+__all__ = ['RandomCrop', 'CenterCrop', 'RandomCropAroundBox', 'RandomCropRandomShape']
 
 
 class RandomCrop(ImageAugmentor):
@@ -39,8 +38,11 @@ class RandomCrop(ImageAugmentor):
         h0, w0 = param
         return img[h0:h0 + self.crop_shape[0], w0:w0 + self.crop_shape[1]]
 
-    def _fprop_coord(self, coord, param):
-        raise NotImplementedError()
+    def _augment_coords(self, coords, param):
+        h0, w0 = param
+        coords[:, 0] = coords[:, 0] - w0
+        coords[:, 1] = coords[:, 1] - h0
+        return coords
 
 
 class CenterCrop(ImageAugmentor):
@@ -54,14 +56,21 @@ class CenterCrop(ImageAugmentor):
         crop_shape = shape2d(crop_shape)
         self._init(locals())
 
-    def _augment(self, img, _):
+    def _get_augment_params(self, img):
         orig_shape = img.shape
         h0 = int((orig_shape[0] - self.crop_shape[0]) * 0.5)
         w0 = int((orig_shape[1] - self.crop_shape[1]) * 0.5)
+        return (h0, w0)
+
+    def _augment(self, img, param):
+        h0, w0 = param
         return img[h0:h0 + self.crop_shape[0], w0:w0 + self.crop_shape[1]]
 
-    def _fprop_coord(self, coord, param):
-        raise NotImplementedError()
+    def _augment_coords(self, coords, param):
+        h0, w0 = param
+        coords[:, 0] = coords[:, 0] - w0
+        coords[:, 1] = coords[:, 1] - h0
+        return coords
 
 
 def perturb_BB(image_shape, bb, max_perturb_pixel,
@@ -72,7 +81,7 @@ def perturb_BB(image_shape, bb, max_perturb_pixel,
 
     Args:
         image_shape: [h, w]
-        bb (Rect): original bounding box
+        bb (IntBox): original bounding box
         max_perturb_pixel: perturbation on each coordinate
         max_aspect_ratio_diff: result can't have an aspect ratio too different from the original
         max_try: if cannot find a valid bounding box, return the original
@@ -85,13 +94,11 @@ def perturb_BB(image_shape, bb, max_perturb_pixel,
     for _ in range(max_try):
         p = rng.randint(-max_perturb_pixel, max_perturb_pixel, [4])
         newbb = bb.copy()
-        newbb.x += p[0]
-        newbb.y += p[1]
-        newx1 = bb.x1 + p[2]
-        newy1 = bb.y1 + p[3]
-        newbb.w = newx1 - newbb.x
-        newbb.h = newy1 - newbb.y
-        if not newbb.validate(image_shape):
+        newbb.x1 += p[0]
+        newbb.y1 += p[1]
+        newbb.x2 = bb.x2 + p[2]
+        newbb.y2 = bb.y2 + p[3]
+        if not newbb.is_valid_box(image_shape):
             continue
         new_ratio = newbb.h * 1.0 / newbb.w
         diff = abs(new_ratio - orig_ratio)
@@ -101,9 +108,10 @@ def perturb_BB(image_shape, bb, max_perturb_pixel,
     return bb
 
 
+# TODO shouldn't include strange augmentors like this.
 class RandomCropAroundBox(ImageAugmentor):
     """
-    Crop a box around a bounding box by some random perturbation
+    Crop a box around a bounding box by some random perturbation.
     """
 
     def __init__(self, perturb_ratio, max_aspect_ratio_diff=0.3):
@@ -118,7 +126,7 @@ class RandomCropAroundBox(ImageAugmentor):
 
     def _get_augment_params(self, img):
         shape = img.shape[:2]
-        box = Rect(0, 0, shape[1] - 1, shape[0] - 1)
+        box = IntBox(0, 0, shape[1] - 1, shape[0] - 1)
         dist = self.perturb_ratio * np.sqrt(shape[0] * shape[1])
         newbox = perturb_BB(shape, box, dist,
                             self.rng, self.max_aspect_ratio_diff)
@@ -127,8 +135,10 @@ class RandomCropAroundBox(ImageAugmentor):
     def _augment(self, img, newbox):
         return newbox.roi(img)
 
-    def _fprop_coord(self, coord, param):
-        raise NotImplementedError()
+    def _augment_coords(self, coords, newbox):
+        coords[:, 0] = coords[:, 0] - newbox.x1
+        coords[:, 1] = coords[:, 1] - newbox.y1
+        return coords
 
 
 class RandomCropRandomShape(ImageAugmentor):
@@ -165,6 +175,12 @@ class RandomCropRandomShape(ImageAugmentor):
         y0, x0, h, w = param
         return img[y0:y0 + h, x0:x0 + w]
 
+    def _augment_coords(self, coords, param):
+        y0, x0, _, _ = param
+        coords[:, 0] = coords[:, 0] - x0
+        coords[:, 1] = coords[:, 1] - y0
+        return coords
+
 
 if __name__ == '__main__':
-    print(perturb_BB([100, 100], Rect(3, 3, 50, 50), 50))
+    print(perturb_BB([100, 100], IntBox(3, 3, 50, 50), 50))

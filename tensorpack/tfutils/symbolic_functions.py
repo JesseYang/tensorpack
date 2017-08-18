@@ -6,6 +6,8 @@ import tensorflow as tf
 from contextlib import contextmanager
 import numpy as np
 
+# __all__ = ['get_scalar_var']
+
 
 # this function exists for backwards-compatibilty
 def prediction_incorrect(logits, label, topk=1, name='incorrect_vector'):
@@ -63,16 +65,17 @@ def class_balanced_cross_entropy(pred, label, name='cross_entropy_loss'):
     Returns:
         class-balanced cross entropy loss.
     """
-    z = batch_flatten(pred)
-    y = tf.cast(batch_flatten(label), tf.float32)
+    with tf.name_scope('class_balanced_cross_entropy'):
+        z = batch_flatten(pred)
+        y = tf.cast(batch_flatten(label), tf.float32)
 
-    count_neg = tf.reduce_sum(1. - y)
-    count_pos = tf.reduce_sum(y)
-    beta = count_neg / (count_neg + count_pos)
+        count_neg = tf.reduce_sum(1. - y)
+        count_pos = tf.reduce_sum(y)
+        beta = count_neg / (count_neg + count_pos)
 
-    eps = 1e-12
-    loss_pos = -beta * tf.reduce_mean(y * tf.log(z + eps))
-    loss_neg = (1. - beta) * tf.reduce_mean((1. - y) * tf.log(1. - z + eps))
+        eps = 1e-12
+        loss_pos = -beta * tf.reduce_mean(y * tf.log(z + eps))
+        loss_neg = (1. - beta) * tf.reduce_mean((1. - y) * tf.log(1. - z + eps))
     cost = tf.subtract(loss_pos, loss_neg, name=name)
     return cost
 
@@ -82,16 +85,18 @@ def class_balanced_sigmoid_cross_entropy(logits, label, name='cross_entropy_loss
     This function accepts logits rather than predictions, and is more numerically stable than
     :func:`class_balanced_cross_entropy`.
     """
-    y = tf.cast(label, tf.float32)
+    with tf.name_scope('class_balanced_sigmoid_cross_entropy'):
+        y = tf.cast(label, tf.float32)
 
-    count_neg = tf.reduce_sum(1. - y)
-    count_pos = tf.reduce_sum(y)
-    beta = count_neg / (count_neg + count_pos)
+        count_neg = tf.reduce_sum(1. - y)
+        count_pos = tf.reduce_sum(y)
+        beta = count_neg / (count_neg + count_pos)
 
-    pos_weight = beta / (1 - beta)
-    cost = tf.nn.weighted_cross_entropy_with_logits(logits=logits, targets=y, pos_weight=pos_weight)
-    cost = tf.reduce_mean(cost * (1 - beta))
-    return tf.where(tf.equal(count_pos, 0.0), 0.0, cost, name=name)
+        pos_weight = beta / (1 - beta)
+        cost = tf.nn.weighted_cross_entropy_with_logits(logits=logits, targets=y, pos_weight=pos_weight)
+        cost = tf.reduce_mean(cost * (1 - beta))
+        zero = tf.equal(count_pos, 0.0)
+    return tf.where(zero, 0.0, cost, name=name)
 
 
 def print_stat(x, message=None):
@@ -100,7 +105,7 @@ def print_stat(x, message=None):
     """
     if message is None:
         message = x.op.name
-    return tf.Print(x, [tf.shape(x), tf.reduce_mean(x), x], summarize=20,
+    return tf.Print(x, [tf.shape(x), tf.reduce_mean(x), rms(x), x], summarize=20,
                     message=message, name='print_' + x.op.name)
 
 
@@ -133,12 +138,14 @@ def huber_loss(x, delta=1, name='huber_loss'):
     Returns:
         a tensor of the same shape of x.
     """
-    sqrcost = tf.square(x)
-    abscost = tf.abs(x)
-    return tf.where(abscost < delta,
-                    sqrcost * 0.5,
-                    abscost * delta - 0.5 * delta ** 2,
-                    name=name)
+    with tf.name_scope('huber_loss'):
+        sqrcost = tf.square(x)
+        abscost = tf.abs(x)
+
+        cond = abscost < delta
+        l2 = sqrcost * 0.5
+        l1 = abscost * delta - 0.5 * delta ** 2
+    return tf.where(cond, l2, l1, name=name)
 
 
 def get_scalar_var(name, init_value, summary=False, trainable=False):

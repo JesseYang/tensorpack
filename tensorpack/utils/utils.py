@@ -14,7 +14,6 @@ import numpy as np
 __all__ = ['change_env',
            'get_rng',
            'fix_rng_seed',
-           'get_tqdm_kwargs',
            'get_tqdm',
            'execute_only_once',
            ]
@@ -44,6 +43,8 @@ _RNG_SEED = None
 
 def fix_rng_seed(seed):
     """
+    Call this function at the beginning of program to fix rng seed within tensorpack.
+
     Args:
         seed (int):
 
@@ -120,6 +121,6 @@ def get_tqdm_kwargs(**kwargs):
 
 
 def get_tqdm(**kwargs):
-    """ Similar to :func:`get_tqdm_kwargs`, but returns the tqdm object
-    directly. """
+    """ Similar to :func:`get_tqdm_kwargs`,
+    but returns the tqdm object directly. """
     return tqdm(**get_tqdm_kwargs(**kwargs))

@@ -11,7 +11,7 @@ if six.PY2:
 else:
     import functools
 
-__all__ = ['map_arg', 'memoized', 'shape2d', 'shape4d',
+__all__ = ['map_arg', 'memoized', 'graph_memoized', 'shape2d', 'shape4d',
            'memoized_ignoreargs', 'log_once']
 
 
@@ -20,12 +20,17 @@ def map_arg(**maps):
     Apply a mapping on certains argument before calling the original function.
 
     Args:
-        maps (dict): {key: map_func}
+        maps (dict): {argument_name: map_func}
     """
     def deco(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            argmap = inspect.getcallargs(func, *args, **kwargs)
+            if six.PY2:
+                argmap = inspect.getcallargs(func, *args, **kwargs)
+            else:
+                # getcallargs was deprecated since 3.5
+                sig = inspect.signature(func)
+                argmap = sig.bind_partial(*args, **kwargs).arguments
             for k, map_func in six.iteritems(maps):
                 if k in argmap:
                     argmap[k] = map_func(argmap[k])
@@ -50,6 +55,7 @@ def graph_memoized(func):
         kwargs.pop(GRAPH_ARG_NAME)
         return func(*args, **kwargs)
 
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         assert GRAPH_ARG_NAME not in kwargs, "No Way!!"
         graph = tf.get_default_graph()

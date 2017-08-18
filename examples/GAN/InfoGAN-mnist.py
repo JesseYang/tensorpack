@@ -14,8 +14,10 @@ from tensorpack import *
 from tensorpack.utils.viz import *
 from tensorpack.tfutils.distributions import *
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
+from tensorpack.tfutils import optimizer, summary
 import tensorpack.tfutils.symbolic_functions as symbf
 from tensorpack.tfutils.gradproc import ScaleGradient, CheckGradient
+from tensorpack.dataflow import dataset
 from GAN import GANTrainer, GANModelDesc
 
 """

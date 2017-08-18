@@ -7,9 +7,9 @@ Neural Network Toolbox on TensorFlow.
 See some [examples](examples) to learn about the framework:
 
 ### Vision:
-+ [DoReFa-Net: train binary / low-bitwidth CNN on ImageNet](examples/DoReFa-Net)
-+ [Train ResNet on ImageNet / Cifar10 / SVHN](examples/ResNet)
++ [Multi-GPU training of ResNet on ImageNet](examples/ResNet)
 + [Generative Adversarial Network(GAN) variants](examples/GAN), including DCGAN, InfoGAN, Conditional GAN, WGAN, BEGAN, DiscoGAN, Image to Image, CycleGAN.
++ [DoReFa-Net: train binary / low-bitwidth CNN on ImageNet](examples/DoReFa-Net)
 + [Fully-convolutional Network for Holistically-Nested Edge Detection(HED)](examples/HED)
 + [Spatial Transformer Networks on MNIST addition](examples/SpatialTransformer)
 + [Visualize CNN saliency maps](examples/Saliency)
@@ -35,13 +35,15 @@ It's Yet Another TF wrapper, but different in:
 	  But you can use any other wrappers within tensorpack, such as sonnet/Keras/slim/tflearn/tensorlayer/....
 
 2. Focus on __training speed__.
-	+	Tensorpack trainer is almost always faster than `feed_dict` based wrappers.
-	  Even on a tiny CNN example, the training runs [2x faster](https://gist.github.com/ppwwyyxx/8d95da79f8d97036a7d67c2416c851b6) than the equivalent Keras code.
+	+	Speed comes for free with tensorpack.
+	  Even on a tiny CNN example, the training runs [1.6x faster](https://gist.github.com/ppwwyyxx/8d95da79f8d97036a7d67c2416c851b6) than the equivalent Keras code.
 
-	+ Data-Parallel Multi-GPU training is off-the-shelf to use. It is as fast as Google's [benchmark code](https://github.com/tensorflow/benchmarks).
+	+ Data-parallel multi-GPU training is off-the-shelf to use. It is as fast as Google's [official benchmark](https://www.tensorflow.org/performance/benchmarks).
+
+	+ Data-parallel distributed training is off-the-shelf to use. It is as slow as Google's official benchmark.
 
 3. Focus on large datasets.
-	+ It's painful to read/preprocess data from TF. Use __DataFlow__ to efficiently process large datasets such as ImageNet in __pure Python__.
+	+ It's painful to read/preprocess data through TF. Use __DataFlow__ to load large datasets (e.g. ImageNet) in __pure Python__ with autoparallelization.
 	+ DataFlow has a unified interface, so you can compose and reuse them to perform complex preprocessing.
 
 4. Interface of extensible __Callbacks__.
@@ -53,14 +55,17 @@ It's Yet Another TF wrapper, but different in:
 	+ Run some operations once a while
 	+ Send loss to your phone
 
+See [tutorials](http://tensorpack.readthedocs.io/en/latest/tutorial/index.html) to know more about these features.
+
 ## Install:
 
 Dependencies:
 
 + Python 2 or 3
 + TensorFlow >= 1.0.0 (>=1.1.0 for Multi-GPU)
-+ Python bindings for OpenCV
++ Python bindings for OpenCV (Optional, but required by a lot of features)
 ```
 pip install -U git+https://github.com/ppwwyyxx/tensorpack.git
 # or add `--user` to avoid system-wide installation.
 ```
+Besides, if you only want to use `tensorpack.dataflow` alone, TensorFlow is also optional.

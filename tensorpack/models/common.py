@@ -3,6 +3,7 @@
 # Author: Yuxin Wu <ppwwyyxx@gmail.com>
 
 import tensorflow as tf
+import inspect
 from functools import wraps
 import six
 import re
@@ -11,13 +12,12 @@ import copy
 from ..tfutils.argscope import get_arg_scope
 from ..tfutils.model_utils import get_shape_str
 from ..utils import logger
-from ..utils.develop import building_rtfd
 
 # make sure each layer is only logged once
 _LAYER_LOGGED = set()
-_LAYER_REGISTERED = {}
+_LAYER_REGISTRY = {}
 
-__all__ = ['layer_register', 'disable_layer_logging', 'get_registered_layer', 'VariableHolder']
+__all__ = ['layer_register']
 
 
 class VariableHolder(object):
@@ -54,11 +54,11 @@ class VariableHolder(object):
 
 
 def _register(name, func):
-    if name in _LAYER_REGISTERED:
+    if name in _LAYER_REGISTRY:
         raise ValueError("Layer named {} is already registered!".format(name))
     if name in ['tf']:
         raise ValueError(logger.error("A layer cannot be named {}".format(name)))
-    _LAYER_REGISTERED[name] = func
+    _LAYER_REGISTRY[name] = func
 
 
 def get_registered_layer(name):
@@ -68,7 +68,7 @@ def get_registered_layer(name):
     Returns:
         the wrapped layer function, or None if not registered.
     """
-    return _LAYER_REGISTERED.get(name, None)
+    return _LAYER_REGISTRY.get(name, None)
 
 
 def disable_layer_logging():
@@ -84,16 +84,19 @@ def disable_layer_logging():
 
 
 def layer_register(
-        log_shape=True,
+        log_shape=False,
         use_scope=True):
     """
     Register a layer.
 
     Args:
         log_shape (bool): log input/output shape of this layer
-        use_scope (bool): whether to call this layer with an extra first argument as scope.
-            If set to False, will try to figure out whether the first argument
-            is scope name or not.
+        use_scope (bool or None):
+            Whether to call this layer with an extra first argument as scope.
+            When set to None, it can be called either with or without
+            the scope name argument.
+            It will try to figure out by checking if the first argument
+            is string or not.
     """
 
     def wrapper(func):
@@ -107,6 +110,11 @@ def layer_register(
             else:
                 assert not log_shape
                 if isinstance(args[0], six.string_types):
+                    if use_scope is False:
+                        logger.warn(
+                            "Please call layer {} without the first scope name argument, "
+                            "or register the layer with use_scope=None to allow "
+                            "two calling methods.".format(func.__name__))
                     name, inputs = args[0], args[1]
                     args = args[1:]  # actual positional args used to call func
                 else:
@@ -117,13 +125,20 @@ def layer_register(
                         isinstance(inputs[0], (tf.Tensor, tf.Variable)))):
                 raise ValueError("Invalid inputs to layer: " + str(inputs))
 
-            # TODO use inspect.getcallargs to enhance?
-            # update from current argument scope
+            # use kwargs from current argument scope
             actual_args = copy.copy(get_arg_scope()[func.__name__])
+            # explicit kwargs overwrite argscope
             actual_args.update(kwargs)
+            if six.PY3:
+                # explicit positional args also override argscope. only work in PY3
+                posargmap = inspect.signature(func).bind_partial(*args).arguments
+                for k in six.iterkeys(posargmap):
+                    if k in actual_args:
+                        del actual_args[k]
 
             if name is not None:        # use scope
                 with tf.variable_scope(name) as scope:
+                    # this name is only used to surpress logging, doesn't hurt to do some heuristics
                     scope_name = re.sub('tower[0-9]+/', '', scope.name)
                     do_log_shape = log_shape and scope_name not in _LAYER_LOGGED
                     if do_log_shape:
@@ -146,10 +161,5 @@ def layer_register(
         wrapped_func.use_scope = use_scope
         _register(func.__name__, wrapped_func)
         return wrapped_func
-
-    # need some special handling for sphinx to work with the arguments
-    if building_rtfd():
-        from decorator import decorator
-        wrapper = decorator(wrapper)
 
     return wrapper

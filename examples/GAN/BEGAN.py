@@ -8,6 +8,7 @@ import argparse
 
 from tensorpack import *
 from tensorpack.tfutils.summary import add_moving_summary
+from tensorpack.utils.gpu import get_nr_gpu
 from tensorpack.utils.globvars import globalns as G
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
 import tensorflow as tf
@@ -18,7 +19,8 @@ from GAN import GANModelDesc, GANTrainer, MultiGPUGANTrainer
 Boundary Equilibrium GAN.
 See the docstring in DCGAN.py for usage.
 
-A pretrained model on CelebA is at https://drive.google.com/open?id=0B5uDfUQ1JTglUmgyZV8zQmNOTVU
+A pretrained model on CelebA is at
+https://drive.google.com/open?id=0B5uDfUQ1JTglUmgyZV8zQmNOTVU
 """
 
 
@@ -103,22 +105,25 @@ class Model(GANModelDesc):
                 with tf.variable_scope('dec'):
                     recon_pos = self.decoder(hidden_pos)
                     recon_neg = self.decoder(hidden_neg)
+
+        with tf.name_scope('viz'):
             summary_image('generated-samples', image_gen)
             summary_image('reconstruct-real', recon_pos)
             summary_image('reconstruct-fake', recon_neg)
 
+        with tf.name_scope('losses'):
             L_pos = tf.reduce_mean(tf.abs(recon_pos - image_pos), name='loss_pos')
             L_neg = tf.reduce_mean(tf.abs(recon_neg - image_gen), name='loss_neg')
 
-        eq = tf.subtract(GAMMA * L_pos, L_neg, name='equilibrium')
-        measure = tf.add(L_pos, tf.abs(eq), name='measure')
+            eq = tf.subtract(GAMMA * L_pos, L_neg, name='equilibrium')
+            measure = tf.add(L_pos, tf.abs(eq), name='measure')
 
-        kt = tf.get_variable('kt', dtype=tf.float32, initializer=0.0)
+            kt = tf.get_variable('kt', dtype=tf.float32, initializer=0.0)
 
-        update_kt = kt.assign_add(1e-3 * eq)
-        with tf.control_dependencies([update_kt]):
-            self.d_loss = tf.subtract(L_pos, kt * L_neg, name='loss_D')
-            self.g_loss = L_neg
+            update_kt = kt.assign_add(1e-3 * eq)
+            with tf.control_dependencies([update_kt]):
+                self.d_loss = tf.subtract(L_pos, kt * L_neg, name='loss_D')
+                self.g_loss = L_neg
 
         add_moving_summary(L_pos, L_neg, eq, measure, self.d_loss)
         tf.summary.scalar('kt-summary', kt)
@@ -131,35 +136,27 @@ class Model(GANModelDesc):
         return opt
 
 
-DCGAN.Model = Model
-
-
-def get_config():
-    return TrainConfig(
-        model=Model(),
-        dataflow=DCGAN.get_data(G.data),
-        callbacks=[
-            ModelSaver(),
-            StatMonitorParamSetter(
-                'learning_rate', 'measure', lambda x: x * 0.5, 0, 10)
-        ],
-        steps_per_epoch=500,
-        max_epoch=400,
-    )
-
-
 if __name__ == '__main__':
     args = DCGAN.get_args()
     if args.sample:
-        DCGAN.sample(args.load, 'gen/conv4.3/output')
+        DCGAN.sample(Model(), args.load, 'gen/conv4.3/output')
     else:
         assert args.data
         logger.auto_set_dir()
-        config = get_config()
-        if args.load:
-            config.session_init = SaverRestore(args.load)
-        nr_gpu = get_nr_gpu()
-        config.nr_tower = max(get_nr_gpu(), 1)
+
+        config = TrainConfig(
+            model=Model(),
+            dataflow=DCGAN.get_data(args.data),
+            callbacks=[
+                ModelSaver(),
+                StatMonitorParamSetter(
+                    'learning_rate', 'measure', lambda x: x * 0.5, 0, 10)
+            ],
+            steps_per_epoch=500,
+            max_epoch=400,
+            session_init=SaverRestore(args.load) if args.load else None,
+            nr_tower=max(get_nr_gpu(), 1)
+        )
         if config.nr_tower == 1:
             GANTrainer(config).train()
         else:

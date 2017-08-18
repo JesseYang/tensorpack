@@ -21,6 +21,7 @@ This way you can define models in Keras-style, and benefit from the more efficei
 """
 
 from tensorpack import *
+from tensorpack.dataflow import dataset
 from tensorpack.utils.argtools import memoized
 
 IMAGE_SIZE = 28
@@ -131,7 +132,7 @@ if __name__ == '__main__':
     if args.load:
         config.session_init = SaverRestore(args.load)
     if args.gpu:
-        config.nr_tower = get_nr_gpu()
+        config.nr_tower = len(args.gpu.split(','))
     if config.nr_tower > 1:
         SyncMultiGPUTrainer(config).train()
     else:

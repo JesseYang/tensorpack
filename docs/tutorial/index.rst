@@ -5,27 +5,21 @@ Tutorials
 A High Level Glance
 ====================
 
-* :doc:`dataflow` is a set of extensible tools to help you define your input data with ease and speed.
+.. image:: https://user-images.githubusercontent.com/1381301/29187907-2caaa740-7dc6-11e7-8220-e20ca52c3ca6.png
 
-  It provides a uniform interface so that data processing modules can be chained together.
-  It allows you to load and process your data in pure Python and accelerate it by prefetching.
-  See also :doc:`input-source`  and :doc:`efficient-dataflow` for more details about the efficiency of data
-  processing.
 
-* You can use any TF-based symbolic function library to define a model in tensorpack.
-  :doc:`model` introduces where and how you define the model for tensorpack trainers to use,
-  and how you can benefit from the small symbolic function library in tensorpack.
+* DataFlow is a library to load data efficiently in Python.
+  Apart from DataFlow, native TF operators can be used for data loading as well.
+  They will eventually be wrapped under the same interface and go through prefetching.
 
-Both DataFlow and models can be used outside tensorpack, as just a data processing library and a symbolic
-function library. Tensopack trainers integrate these two components and add more convenient features.
+* You can use any TF-based symbolic function library to define a model, including
+  a small set of models within tensorpack. ``ModelDesc`` is an interface to connect symbolic graph to tensorpack trainers.
 
-* tensorpack :doc:`trainer` manages the training loops for you, so you will not have to worry about
-  details such as multi-GPU training. At the same time, it keeps the power of customization
-  through callbacks.
+* tensorpack trainers manage the training loops for you. At the same time, you own the power of customization
+  through callbacks. They also include data parallel logic for multi-GPU or distributed training.
 
 * Callbacks are like ``tf.train.SessionRunHook``, or plugins, or extensions. During training,
-  everything you want to do other than the main iterations can be defined through callbacks.
-  See :doc:`callback` for some examples what you can do.
+  everything you want to do other than the main iterations can be defined through callbacks and easily reused.
 
 User Tutorials
 ========================
@@ -36,7 +30,8 @@ User Tutorials
   dataflow
   input-source
   efficient-dataflow
-  model
+  graph
+  symbolic
   trainer
   callback
   faq
@@ -50,5 +45,5 @@ Extend Tensorpack
   extend/dataflow
   extend/augmentor
   extend/model
-  extend/trainer
   extend/callback
+  extend/trainer

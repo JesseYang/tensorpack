@@ -5,12 +5,14 @@ API Documentation
   :maxdepth: 1
 
 
-  models
   dataflow
+  dataflow.dataset
+  dataflow.imgaug
+  models
   callbacks
+  graph_builder
   train
   predict
   tfutils
   utils
-  RL
 
