@@ -87,3 +87,7 @@ target/
 examples/YOLOv2
 examples/CmdtClassify
 examples/Siamese
+examples/BonePoint
+examples/Segmentation
+examples/LineSegmentation
+examples/SeqRecog
